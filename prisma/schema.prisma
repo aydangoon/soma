@@ -13,4 +13,6 @@ model Todo {
   createdAt DateTime  @default(now())
   due       DateTime?
   imageUrl  String?
+  dependencies Todo[] @relation("TodoDependencies")
+  dependents   Todo[] @relation("TodoDependencies")
 }

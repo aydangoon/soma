@@ -1,13 +1,27 @@
 "use client";
-import { Todo } from "@prisma/client";
 import { useState, useEffect } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  getTodos,
+  createTodo,
+  deleteTodo,
+  assignImageToTodo,
+} from "@/app/actions/todos";
+import { Dag } from "@/lib/dag";
+
+type Todo = NonNullable<Awaited<ReturnType<typeof getTodos>>["data"]>[0];
 
 export default function Home() {
-  const [newTodo, setNewTodo] = useState<{ title: string; due?: string }>({
-    title: "",
-  });
-  const [todos, setTodos] = useState([]);
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetchTodos();
@@ -15,24 +29,33 @@ export default function Home() {
 
   const fetchTodos = async () => {
     try {
-      const res = await fetch("/api/todos");
-      const data = await res.json();
-      setTodos(data);
+      setLoading(true);
+      const result = await getTodos();
+      if (result.success && result.data) {
+        setTodos(result.data);
+      } else {
+        console.error("Failed to fetch todos:", result.error);
+      }
     } catch (error) {
       console.error("Failed to fetch todos:", error);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleAddTodo = async () => {
-    if (!newTodo.title.trim()) return;
+  const handleAddTodo = async (input: {
+    title: string;
+    due?: string;
+    dependencies?: number[];
+  }) => {
+    if (!input.title.trim()) return;
     try {
-      await fetch("/api/todos", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newTodo),
-      });
-      setNewTodo({ title: "" });
-      fetchTodos();
+      const result = await createTodo(input);
+      if (result.success) {
+        fetchTodos();
+      } else {
+        console.error("Failed to add todo:", result.error);
+      }
     } catch (error) {
       console.error("Failed to add todo:", error);
     }
@@ -40,14 +63,41 @@ export default function Home() {
 
   const handleDeleteTodo = async (id: number) => {
     try {
-      await fetch(`/api/todos/${id}`, {
-        method: "DELETE",
-      });
-      fetchTodos();
+      const result = await deleteTodo(id);
+      if (result.success) {
+        fetchTodos();
+      } else {
+        console.error("Failed to delete todo:", result.error);
+      }
     } catch (error) {
       console.error("Failed to delete todo:", error);
     }
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-orange-500 to-red-500 flex flex-col items-center p-4">
+        <div className="w-full max-w-md">
+          <h1 className="text-4xl font-bold text-center text-white mb-8">
+            Things To Do App
+          </h1>
+          <div className="space-y-4">
+            {[...Array(3)].map((_, i) => (
+              <Skeleton
+                key={i}
+                className="h-32 bg-white bg-opacity-90 rounded-lg"
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const dag = dagify(todos);
+  console.log("todos", [...todos]);
+  console.log("dag", dag);
+  console.log("order of execution", [...dag.inverted().topologicalSort()]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-orange-500 to-red-500 flex flex-col items-center p-4">
@@ -55,28 +105,9 @@ export default function Home() {
         <h1 className="text-4xl font-bold text-center text-white mb-8">
           Things To Do App
         </h1>
-        <div className="flex mb-6">
-          <input
-            type="text"
-            className="flex-grow p-3 rounded-l-full focus:outline-none text-gray-700"
-            placeholder="Add a new todo"
-            value={newTodo.title}
-            onChange={(e) => setNewTodo({ ...newTodo, title: e.target.value })}
-          />
-          <input
-            type="date"
-            value={newTodo.due ?? ""}
-            onChange={(e) => setNewTodo({ ...newTodo, due: e.target.value })}
-          />
-          <button
-            onClick={handleAddTodo}
-            className="bg-white text-indigo-600 p-3 rounded-r-full hover:bg-gray-100 transition duration-300"
-          >
-            Add
-          </button>
-        </div>
+        <AddTodoDialog todos={todos} onAddTodo={handleAddTodo} />
         <ul>
-          {todos.map((todo: Todo) => (
+          {todos.map((todo) => (
             <TodoItem key={todo.id} todo={todo} onDelete={handleDeleteTodo} />
           ))}
         </ul>
@@ -95,16 +126,20 @@ export function TodoItem({ todo, onDelete }: TodoItemProps) {
 
   useEffect(() => {
     const fetchImage = async () => {
-      const res = await fetch(`/api/todos/${todo.id}/assign-image`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      setImageUrl(data.imageUrl);
+      if (!todo.imageUrl) {
+        try {
+          const result = await assignImageToTodo(todo.id);
+          if (result.success && result.data) {
+            setImageUrl(result.data.imageUrl);
+          }
+        } catch (error) {
+          console.error("Failed to assign image:", error);
+        }
+      }
     };
-    if (!todo.imageUrl) {
-      fetchImage();
-    }
-  }, [todo.imageUrl]);
+
+    fetchImage();
+  }, [todo.id, todo.imageUrl]);
 
   return (
     <li
@@ -133,7 +168,6 @@ export function TodoItem({ todo, onDelete }: TodoItemProps) {
             onClick={() => onDelete(todo.id)}
             className="text-red-500 hover:text-red-700 transition duration-300"
           >
-            {/* Delete Icon */}
             <svg
               className="w-6 h-6"
               fill="none"
@@ -161,4 +195,146 @@ export function TodoItem({ todo, onDelete }: TodoItemProps) {
       )}
     </li>
   );
+}
+
+type AddTodoFormProps = {
+  todos: Todo[];
+  onAddTodo: (input: {
+    title: string;
+    due?: string;
+    dependencies?: number[];
+  }) => void;
+};
+
+export function AddTodoDialog({ todos, onAddTodo }: AddTodoFormProps) {
+  const [title, setTitle] = useState("");
+  const [due, setDue] = useState<string | undefined>(undefined);
+  const [dependencies, setDependencies] = useState<number[]>([]);
+  const [open, setOpen] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) return;
+
+    onAddTodo({ title, due, dependencies });
+
+    setTitle("");
+    setDue(undefined);
+    setDependencies([]);
+    setOpen(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <button className="w-full bg-white bg-opacity-90 text-gray-800 py-3 px-4 rounded-lg shadow-lg hover:bg-opacity-100 transition duration-300 mb-4">
+          Add Todo
+        </button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add Todo</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={handleSubmit}>
+          <div className="space-y-4">
+            <div>
+              <label
+                htmlFor="title"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
+                Title
+              </label>
+              <input
+                id="title"
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
+                placeholder="Enter todo title"
+                required
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="due"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
+                Due Date (optional)
+              </label>
+              <input
+                id="due"
+                type="date"
+                value={due || ""}
+                onChange={(e) => setDue(e.target.value || undefined)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
+              />
+            </div>
+            {todos.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Dependencies (optional)
+                </label>
+                <div className="gap-2 max-h-32 overflow-y-auto flex flex-wrap">
+                  {todos.map((todo) => (
+                    <div key={todo.id} className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id={`todo-${todo.id}`}
+                        checked={dependencies.includes(todo.id)}
+                        onChange={(e) =>
+                          setDependencies((d) =>
+                            e.target.checked
+                              ? [...d, todo.id]
+                              : d.filter((id) => id !== todo.id)
+                          )
+                        }
+                        className="rounded border-gray-300 text-orange-500 focus:ring-orange-500"
+                      />
+                      <label
+                        htmlFor={`todo-${todo.id}`}
+                        className="text-sm text-gray-700"
+                      >
+                        {todo.title}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="mt-6">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800 transition duration-300"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-orange-500 text-white rounded-md hover:bg-orange-600 transition duration-300"
+            >
+              Add Todo
+            </button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function dagify(todos: Todo[]): Dag<number, Todo> {
+  const dag = new Dag<number, Todo>();
+
+  todos.forEach((todo) => {
+    dag.addNode({ id: todo.id, data: todo });
+  });
+
+  todos.forEach((todo) => {
+    todo.dependencies.forEach((dependency) => {
+      dag.addEdge(todo.id, dependency.id);
+    });
+  });
+
+  return dag;
 }
